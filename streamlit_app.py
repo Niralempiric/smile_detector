@@ -3,8 +3,6 @@ from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfigurati
 import cv2
 import numpy as np
 import mediapipe as mp
-import mediapipe.solutions.face_mesh as mp_face_mesh
-import mediapipe.solutions.drawing_utils as mp_drawing
 from collections import deque
 import av
 
@@ -15,7 +13,8 @@ import av
 class SmileVideoProcessor(VideoProcessorBase):
     def __init__(self):
         # Initialize MediaPipe Face Mesh
-        self.face_mesh = mp_face_mesh.FaceMesh(
+        self.mp_face_mesh = mp.solutions.face_mesh
+        self.face_mesh = self.mp_face_mesh.FaceMesh(
             max_num_faces=1,
             refine_landmarks=True,
             min_detection_confidence=0.5,
