@@ -308,4 +308,4 @@ def detect_smile_mediapipe():
 
 if __name__ == "__main__":
     detect_smile_mediapipe()
-
+    

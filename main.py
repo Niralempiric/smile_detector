@@ -9,6 +9,159 @@ import mediapipe as mp
 from collections import deque
 
 
+def is_face_front_facing(face_landmarks, image_width, image_height):
+    """
+    Check if face is front-facing (not tilted up or down)
+    
+    Args:
+        face_landmarks: MediaPipe face landmarks
+        image_width: Width of the image
+        image_height: Height of the image
+    
+    Returns:
+        tuple: (is_front_facing: bool, angle_info: dict)
+    """
+    # Key landmarks for angle detection
+    # Forehead center: 10
+    # Nose tip: 4
+    # Chin center: 175
+    # Left eye outer: 33
+    # Right eye outer: 263
+    
+    FOREHEAD = 10
+    NOSE_TIP = 4
+    CHIN = 175
+    LEFT_EYE_OUTER = 33
+    RIGHT_EYE_OUTER = 263
+    
+    # Get landmark positions
+    forehead = face_landmarks.landmark[FOREHEAD]
+    nose_tip = face_landmarks.landmark[NOSE_TIP]
+    chin = face_landmarks.landmark[CHIN]
+    left_eye = face_landmarks.landmark[LEFT_EYE_OUTER]
+    right_eye = face_landmarks.landmark[RIGHT_EYE_OUTER]
+    
+    # Convert to pixel coordinates
+    forehead_px = np.array([forehead.x * image_width, forehead.y * image_height])
+    nose_tip_px = np.array([nose_tip.x * image_width, nose_tip.y * image_height])
+    chin_px = np.array([chin.x * image_width, chin.y * image_height])
+    left_eye_px = np.array([left_eye.x * image_width, left_eye.y * image_height])
+    right_eye_px = np.array([right_eye.x * image_width, right_eye.y * image_height])
+    
+    # Calculate face vertical length (forehead to chin)
+    face_vertical_length = np.linalg.norm(chin_px - forehead_px)
+    
+    if face_vertical_length == 0:
+        return False, {"angle": 0, "direction": "unknown"}
+    
+    # Calculate nose position relative to face center
+    face_center_y = (forehead_px[1] + chin_px[1]) / 2
+    nose_offset_y = nose_tip_px[1] - face_center_y
+    
+    # Normalize by face length
+    normalized_nose_offset = nose_offset_y / face_vertical_length
+    
+    # Calculate eye alignment (should be roughly horizontal when front-facing)
+    eye_vertical_diff = abs(left_eye_px[1] - right_eye_px[1])
+    eye_horizontal_dist = abs(right_eye_px[0] - left_eye_px[0])
+    
+    # Normalize eye vertical difference
+    eye_alignment_ratio = eye_vertical_diff / eye_horizontal_dist if eye_horizontal_dist > 0 else 0
+    
+    # Check if face is tilted up or down
+    # When looking up: nose is higher relative to face center (negative offset)
+    # When looking down: nose is lower relative to face center (positive offset)
+    # When front-facing: nose should be close to face center (small offset)
+    
+    # Thresholds for front-facing detection (strict - face must be well-centered)
+    MAX_NOSE_OFFSET = 0.12  # Nose should be within 12% of face center vertically (strict)
+    MAX_EYE_TILT = 0.08  # Eyes should be roughly horizontal (less than 8% tilt, strict)
+    
+    is_front_facing = (abs(normalized_nose_offset) <= MAX_NOSE_OFFSET and 
+                      eye_alignment_ratio <= MAX_EYE_TILT)
+    
+    # Determine angle direction
+    if normalized_nose_offset < -MAX_NOSE_OFFSET:
+        direction = "up"
+        angle = abs(normalized_nose_offset) * 100
+    elif normalized_nose_offset > MAX_NOSE_OFFSET:
+        direction = "down"
+        angle = abs(normalized_nose_offset) * 100
+    else:
+        direction = "front"
+        angle = abs(normalized_nose_offset) * 100
+    
+    angle_info = {
+        "angle": angle,
+        "direction": direction,
+        "normalized_nose_offset": normalized_nose_offset,
+        "eye_alignment_ratio": eye_alignment_ratio
+    }
+    
+    return is_front_facing, angle_info
+
+
+def is_face_in_region(face_landmarks, image_width, image_height, region):
+    """
+    Check if face is centered within the detection region
+    
+    Args:
+        face_landmarks: MediaPipe face landmarks
+        image_width: Width of the image
+        image_height: Height of the image
+        region: Tuple of (x, y, width, height) defining the detection region
+    
+    Returns:
+        bool: True if face is centered in region, False otherwise
+    """
+    region_x, region_y, region_width, region_height = region
+    
+    # Calculate region center
+    region_center_x = region_x + region_width // 2
+    region_center_y = region_y + region_height // 2
+    
+    # Get face bounding box
+    x_coords = [lm.x * image_width for lm in face_landmarks.landmark]
+    y_coords = [lm.y * image_height for lm in face_landmarks.landmark]
+    x_min, x_max = int(min(x_coords)), int(max(x_coords))
+    y_min, y_max = int(min(y_coords)), int(max(y_coords))
+    
+    # Calculate face center
+    face_center_x = (x_min + x_max) // 2
+    face_center_y = (y_min + y_max) // 2
+    
+    # Calculate distance from face center to region center
+    center_offset_x = abs(face_center_x - region_center_x)
+    center_offset_y = abs(face_center_y - region_center_y)
+    
+    # Allow face center to be within 25% of region size from the center
+    # This ensures the face is reasonably centered
+    max_offset_x = region_width * 0.25
+    max_offset_y = region_height * 0.25
+    
+    # Check if face is centered (within tolerance)
+    is_centered_x = center_offset_x <= max_offset_x
+    is_centered_y = center_offset_y <= max_offset_y
+    
+    # Also check if most of the face (at least 80%) is within the region
+    face_width = x_max - x_min
+    face_height = y_max - y_min
+    
+    # Calculate overlap
+    overlap_x = max(0, min(x_max, region_x + region_width) - max(x_min, region_x))
+    overlap_y = max(0, min(y_max, region_y + region_height) - max(y_min, region_y))
+    overlap_area = overlap_x * overlap_y
+    face_area = face_width * face_height
+    
+    if face_area == 0:
+        return False
+    
+    overlap_ratio = overlap_area / face_area
+    
+    # Face must be centered AND at least 80% of face must be within region
+    return is_centered_x and is_centered_y and overlap_ratio >= 0.8
+
+
 def calculate_face_size(face_landmarks, image_width, image_height):
     """
     Calculate face size for normalization (distance-based scaling)
@@ -270,7 +423,25 @@ def detect_smile():
         print("Make sure your iPhone camera (Camo) is running and connected")
         return
     
+    # Get frame dimensions to set up detection region
+    ret, test_frame = cap.read()
+    if not ret:
+        print("Error: Could not read initial frame")
+        return
+    
+    frame_height, frame_width = test_frame.shape[:2]
+    
+    # Define fixed detection region (centered, 65% of frame size)
+    REGION_SIZE_RATIO = 0.65  # 65% of frame width/height
+    region_width = int(frame_width * REGION_SIZE_RATIO)
+    region_height = int(frame_height * REGION_SIZE_RATIO)
+    region_x = (frame_width - region_width) // 2
+    region_y = (frame_height - region_height) // 2
+    
+    detection_region = (region_x, region_y, region_width, region_height)
+    
     print("Smile Detection Started!")
+    print("Center your face in the green detection region and face the camera directly")
     print("Press 'q' to quit")
     
     # Use a deque for smoothing (moving average)
@@ -307,9 +478,117 @@ def detect_smile():
             results = face_mesh.process(frame_rgb)
             
             h, w = frame.shape[:2]
+            
+            # Draw detection region
+            region_x, region_y, region_width, region_height = detection_region
+            region_in_use = False
+            face_in_region = False
+            face_is_front_facing = False
+            angle_info = None
+            
+            # Check if any face is in region, centered, and front-facing
+            face_in_region_landmarks = None
+            if results.multi_face_landmarks:
+                for face_landmarks in results.multi_face_landmarks:
+                    if is_face_in_region(face_landmarks, w, h, detection_region):
+                        # Check if face is front-facing
+                        is_front, angle_data = is_face_front_facing(face_landmarks, w, h)
+                        if is_front:
+                            face_in_region = True
+                            face_is_front_facing = True
+                            face_in_region_landmarks = face_landmarks
+                            region_in_use = True
+                            break
+                        else:
+                            # Face is in region but not front-facing
+                            face_in_region_landmarks = face_landmarks
+                            angle_info = angle_data
+                            break
+            
+            # Draw region border with color based on face presence, centering, and angle
+            if face_in_region and face_is_front_facing:
+                # Green when face is centered and front-facing
+                region_color = (0, 255, 0)  # Green
+                region_thickness = 3
+                status_text = "Face Centered - Detecting"
+                status_color = (0, 255, 0)
+            else:
+                # Yellow/Red/Orange when face not ready - show unified message
+                if results.multi_face_landmarks:
+                    if face_in_region_landmarks and angle_info:
+                        # Face is in region but not front-facing
+                        region_color = (0, 165, 255)  # Orange - face at angle
+                        status_text = "Please Center The Face"
+                        status_color = (0, 165, 255)
+                    else:
+                        # Face detected but not centered
+                        region_color = (0, 165, 255)  # Orange - face detected but not centered
+                        status_text = "Please Center The Face"
+                        status_color = (0, 165, 255)
+                else:
+                    region_color = (0, 0, 255)  # Red - no face detected
+                    status_text = "Please Center The Face"
+                    status_color = (0, 0, 255)
+                region_thickness = 2
+            
+            # Draw region rectangle
+            cv2.rectangle(frame, 
+                         (region_x, region_y), 
+                         (region_x + region_width, region_y + region_height), 
+                         region_color, 
+                         region_thickness)
+            
+            # Draw semi-transparent overlay outside region (darker area)
+            overlay = frame.copy()
+            cv2.rectangle(overlay, (0, 0), (w, h), (0, 0, 0), -1)  # Black overlay
+            cv2.rectangle(overlay, 
+                         (region_x, region_y), 
+                         (region_x + region_width, region_y + region_height), 
+                         (0, 0, 0), 
+                         -1)  # Cut out region
+            cv2.addWeighted(overlay, 0.3, frame, 0.7, 0, frame)  # Blend overlay
+            
+            # Redraw region border on top of overlay
+            cv2.rectangle(frame, 
+                         (region_x, region_y), 
+                         (region_x + region_width, region_y + region_height), 
+                         region_color, 
+                         region_thickness)
+            
+            # Draw corner guides for better positioning
+            corner_size = 20
+            corner_thickness = 3
+            # Top-left corner
+            cv2.line(frame, (region_x, region_y), (region_x + corner_size, region_y), region_color, corner_thickness)
+            cv2.line(frame, (region_x, region_y), (region_x, region_y + corner_size), region_color, corner_thickness)
+            # Top-right corner
+            cv2.line(frame, (region_x + region_width, region_y), (region_x + region_width - corner_size, region_y), region_color, corner_thickness)
+            cv2.line(frame, (region_x + region_width, region_y), (region_x + region_width, region_y + corner_size), region_color, corner_thickness)
+            # Bottom-left corner
+            cv2.line(frame, (region_x, region_y + region_height), (region_x + corner_size, region_y + region_height), region_color, corner_thickness)
+            cv2.line(frame, (region_x, region_y + region_height), (region_x, region_y + region_height - corner_size), region_color, corner_thickness)
+            # Bottom-right corner
+            cv2.line(frame, (region_x + region_width, region_y + region_height), (region_x + region_width - corner_size, region_y + region_height), region_color, corner_thickness)
+            cv2.line(frame, (region_x + region_width, region_y + region_height), (region_x + region_width, region_y + region_height - corner_size), region_color, corner_thickness)
+            
+            # Draw center marker to help with alignment
+            center_x = region_x + region_width // 2
+            center_y = region_y + region_height // 2
+            center_marker_size = 15
+            center_thickness = 2
+            # Draw crosshair at center
+            cv2.line(frame, (center_x - center_marker_size, center_y), (center_x + center_marker_size, center_y), region_color, center_thickness)
+            cv2.line(frame, (center_x, center_y - center_marker_size), (center_x, center_y + center_marker_size), region_color, center_thickness)
+            # Draw small circle at center
+            cv2.circle(frame, (center_x, center_y), 3, region_color, -1)
+            
+            # Display status text
+            cv2.putText(frame, status_text, (region_x, region_y - 15), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
+            
             current_smile_score = 0.0
-            smile_text = "No Face"
-            smile_color = (128, 128, 128)
+            smile_text = "Please Center The Face"
+            smile_color = (0, 165, 255)  # Orange
             lip_coords = None
             current_mouth_width = 0.0
             current_mouth_height = 0.0
@@ -320,217 +599,247 @@ def detect_smile():
             eye_coords = None
             smile_type = ""  # "Genuine", "Fake", or "Laugh"
             
-            if results.multi_face_landmarks:
-                for face_landmarks in results.multi_face_landmarks:
-                    # Calculate smile score from landmarks (returns normalized values)
-                    current_smile_score, lip_coords, current_mouth_width, current_mouth_height, current_normalized_mouth_width, current_normalized_mouth_height = calculate_smile_score_from_landmarks(
-                        face_landmarks, w, h, baseline_width
-                    )
+            # Only process faces that are within the detection region AND front-facing
+            # Detection will ONLY happen when face is properly centered and front-facing
+            if face_in_region_landmarks is not None and face_is_front_facing:
+                face_landmarks = face_in_region_landmarks
+                # Calculate smile score from landmarks (returns normalized values)
+                current_smile_score, lip_coords, current_mouth_width, current_mouth_height, current_normalized_mouth_width, current_normalized_mouth_height = calculate_smile_score_from_landmarks(
+                    face_landmarks, w, h, baseline_width
+                )
                     
                     # Calculate eye aperture (returns normalized value)
-                    avg_aperture, left_aperture, right_aperture, eye_coords, current_normalized_eye_aperture = calculate_eye_aperture(
-                        face_landmarks, w, h
-                    )
-                    current_eye_aperture = avg_aperture
+                avg_aperture, left_aperture, right_aperture, eye_coords, current_normalized_eye_aperture = calculate_eye_aperture(
+                    face_landmarks, w, h
+                )
+                current_eye_aperture = avg_aperture
+                
+                # Update baseline using NORMALIZED values (distance-independent)
+                # Use rolling average to establish baseline - only update when clearly not smiling
+                if current_smile_score < 0.4:  # More conservative threshold for baseline updates
+                    # Use normalized values for baseline tracking
+                    baseline_widths.append(current_normalized_mouth_width)
+                    if len(baseline_widths) > 10:  # Need more frames (10) for stable baseline
+                        baseline_width = sum(baseline_widths) / len(baseline_widths)
+                elif baseline_width is None and len(baseline_widths) > 0:
+                    # If no baseline yet, use current normalized width as initial baseline
+                    baseline_width = sum(baseline_widths) / len(baseline_widths) if baseline_widths else current_normalized_mouth_width
+                
+                # Update baseline eye aperture using normalized values
+                if current_smile_score < 0.4:  # More conservative threshold for baseline updates
+                    baseline_eye_apertures.append(current_normalized_eye_aperture)
+                    if len(baseline_eye_apertures) > 10:  # Need more frames (10) for stable baseline
+                        baseline_eye_aperture = sum(baseline_eye_apertures) / len(baseline_eye_apertures)
+                elif baseline_eye_aperture is None and len(baseline_eye_apertures) > 0:
+                    # If no baseline yet, use current normalized aperture as initial baseline
+                    baseline_eye_aperture = sum(baseline_eye_apertures) / len(baseline_eye_apertures) if baseline_eye_apertures else current_normalized_eye_aperture
+                
+                # Update baseline mouth height using normalized values
+                if current_smile_score < 0.4:  # More conservative threshold for baseline updates
+                    baseline_mouth_heights.append(current_normalized_mouth_height)
+                    if len(baseline_mouth_heights) > 10:  # Need more frames (10) for stable baseline
+                        baseline_mouth_height = sum(baseline_mouth_heights) / len(baseline_mouth_heights)
+                elif baseline_mouth_height is None and len(baseline_mouth_heights) > 0:
+                    # If no baseline yet, use current normalized height as initial baseline
+                    baseline_mouth_height = sum(baseline_mouth_heights) / len(baseline_mouth_heights) if baseline_mouth_heights else current_normalized_mouth_height
+                
+                # Draw face landmarks (optional - can comment out)
+                # mp_drawing.draw_landmarks(
+                #     frame,
+                #     face_landmarks,
+                #     mp_face_mesh.FACEMESH_CONTOURS,
+                #     None,
+                #     mp.solutions.drawing_styles.get_default_face_mesh_contours_style()
+                # )
+                
+                # Get face bounding box for display
+                x_coords = [lm.x * w for lm in face_landmarks.landmark]
+                y_coords = [lm.y * h for lm in face_landmarks.landmark]
+                x_min, x_max = int(min(x_coords)), int(max(x_coords))
+                y_min, y_max = int(min(y_coords)), int(max(y_coords))
+                
+                # Draw face bounding box
+                cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), (255, 0, 0), 2)
+                cv2.putText(frame, 'Face', (x_min, y_min - 10), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+                
+                # Draw ALL lip coordinates if detected
+                if lip_coords:
+                    left_corner = lip_coords['left_corner']
+                    right_corner = lip_coords['right_corner']
+                    top_center = lip_coords['top_center']
+                    bottom_center = lip_coords['bottom_center']
                     
-                    # Update baseline using NORMALIZED values (distance-independent)
-                    # Use rolling average to establish baseline - only update when clearly not smiling
-                    if current_smile_score < 0.4:  # More conservative threshold for baseline updates
-                        # Use normalized values for baseline tracking
-                        baseline_widths.append(current_normalized_mouth_width)
-                        if len(baseline_widths) > 10:  # Need more frames (10) for stable baseline
-                            baseline_width = sum(baseline_widths) / len(baseline_widths)
-                    elif baseline_width is None and len(baseline_widths) > 0:
-                        # If no baseline yet, use current normalized width as initial baseline
-                        baseline_width = sum(baseline_widths) / len(baseline_widths) if baseline_widths else current_normalized_mouth_width
+                    # Draw lip corners (green circles)
+                    cv2.circle(frame, left_corner, 5, (0, 255, 0), -1)
+                    cv2.circle(frame, right_corner, 5, (0, 255, 0), -1)
                     
-                    # Update baseline eye aperture using normalized values
-                    if current_smile_score < 0.4:  # More conservative threshold for baseline updates
-                        baseline_eye_apertures.append(current_normalized_eye_aperture)
-                        if len(baseline_eye_apertures) > 10:  # Need more frames (10) for stable baseline
-                            baseline_eye_aperture = sum(baseline_eye_apertures) / len(baseline_eye_apertures)
-                    elif baseline_eye_aperture is None and len(baseline_eye_apertures) > 0:
-                        # If no baseline yet, use current normalized aperture as initial baseline
-                        baseline_eye_aperture = sum(baseline_eye_apertures) / len(baseline_eye_apertures) if baseline_eye_apertures else current_normalized_eye_aperture
+                    # Draw line connecting corners
+                    cv2.line(frame, left_corner, right_corner, (0, 255, 0), 2)
                     
-                    # Update baseline mouth height using normalized values
-                    if current_smile_score < 0.4:  # More conservative threshold for baseline updates
-                        baseline_mouth_heights.append(current_normalized_mouth_height)
-                        if len(baseline_mouth_heights) > 10:  # Need more frames (10) for stable baseline
-                            baseline_mouth_height = sum(baseline_mouth_heights) / len(baseline_mouth_heights)
-                    elif baseline_mouth_height is None and len(baseline_mouth_heights) > 0:
-                        # If no baseline yet, use current normalized height as initial baseline
-                        baseline_mouth_height = sum(baseline_mouth_heights) / len(baseline_mouth_heights) if baseline_mouth_heights else current_normalized_mouth_height
+                    # Draw top and bottom lip centers (blue circles)
+                    cv2.circle(frame, top_center, 4, (255, 0, 0), -1)
+                    cv2.circle(frame, bottom_center, 4, (255, 0, 0), -1)
                     
-                    # Draw face landmarks (optional - can comment out)
-                    # mp_drawing.draw_landmarks(
-                    #     frame,
-                    #     face_landmarks,
-                    #     mp_face_mesh.FACEMESH_CONTOURS,
-                    #     None,
-                    #     mp.solutions.drawing_styles.get_default_face_mesh_contours_style()
-                    # )
+                    # Draw additional key lip points (yellow)
+                    cv2.circle(frame, lip_coords['top_lip_left'], 3, (0, 255, 255), -1)
+                    cv2.circle(frame, lip_coords['top_lip_right'], 3, (0, 255, 255), -1)
+                    cv2.circle(frame, lip_coords['bottom_lip_left'], 3, (0, 255, 255), -1)
+                    cv2.circle(frame, lip_coords['bottom_lip_right'], 3, (0, 255, 255), -1)
                     
+                    # Draw ALL mouth landmarks (small cyan dots)
+                    if 'all_landmarks' in lip_coords:
+                        for landmark_name, coord in lip_coords['all_landmarks'].items():
+                            cv2.circle(frame, coord, 2, (255, 255, 0), -1)
+                    
+                    # Display key coordinates
+                    coord_text = f'L:{left_corner[0]},{left_corner[1]} R:{right_corner[0]},{right_corner[1]}'
+                    cv2.putText(frame, coord_text, (x_min, y_max + 20), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                    
+                    # Display all coordinates as text (scrollable if needed)
+                    all_coords_text = "All Lip Coords: "
+                    coord_list = []
+                    if 'all_landmarks' in lip_coords:
+                        for landmark_name, coord in lip_coords['all_landmarks'].items():
+                            coord_list.append(f"{landmark_name}:({coord[0]},{coord[1]})")
+                    
+                    # Display coordinates in multiple lines if needed
+                    coord_display = ", ".join(coord_list[:5])  # Show first 5
+                    if len(coord_list) > 5:
+                        coord_display += f" ... (+{len(coord_list)-5} more)"
+                    cv2.putText(frame, coord_display, (x_min, y_max + 40), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+                
+                # Classification: No Smile, Smile (Genuine/Fake), or Laugh (Genuine/Fake)
+                # Improved classification with better thresholds
+                SMILE_DETECTION_THRESHOLD = 0.5  # Threshold for mouth width increase
+                
+                # Calculate mouth opening and eye aperture changes (if baselines available)
+                mouth_opening_ratio = 0.0
+                eye_aperture_decrease = 0.0
+                
+                if (baseline_mouth_height and baseline_mouth_height > 0 and 
+                    baseline_eye_aperture and baseline_eye_aperture > 0):
+                    # Check if mouth is opened (ratio compared to baseline) - using normalized values
+                    mouth_opening_ratio = current_normalized_mouth_height / baseline_mouth_height if baseline_mouth_height > 0 else 0
+                    
+                    # Check if eyes are smaller (percentage decrease) - using normalized values
+                    eye_aperture_decrease = ((baseline_eye_aperture - current_normalized_eye_aperture) / baseline_eye_aperture) * 100
+                
+                # Classification logic with improved thresholds
+                if current_smile_score >= SMILE_DETECTION_THRESHOLD:
+                    # Mouth width exceeds threshold - classify as laugh or smile
+                    
+                    # Check for LAUGH first (mouth significantly opened)
+                    MOUTH_OPENING_THRESHOLD = 1.35  # Mouth opened at least 35% more than baseline
+                    EYE_SQUINT_THRESHOLD_LAUGH = 12.0  # Eyes must be at least 12% smaller for genuine laugh
+                    EYE_NO_SQUINT_THRESHOLD = 3.0  # Eyes NOT smaller (less than 3% decrease) = fake laugh
+                    
+                    if mouth_opening_ratio >= MOUTH_OPENING_THRESHOLD:
+                        # Mouth is opened significantly - this is a laugh (genuine or fake)
+                        if eye_aperture_decrease >= EYE_SQUINT_THRESHOLD_LAUGH:
+                            # Genuine Laugh: mouth opened AND eyes significantly smaller
+                            smile_text = 'Genuine Laugh!'
+                            smile_color = (255, 0, 255)  # Magenta
+                            smile_type = "Laugh"
+                        elif eye_aperture_decrease < EYE_NO_SQUINT_THRESHOLD:
+                            # Fake Laugh: mouth opened BUT eyes NOT smaller
+                            smile_text = 'Fake Laugh'
+                            smile_color = (0, 100, 255)  # Dark Orange/Red
+                            smile_type = "Fake Laugh"
+                        else:
+                            # Mouth opened but eyes somewhat smaller - could be genuine laugh, show as analyzing
+                            smile_text = 'Laugh (Analyzing...)'
+                            smile_color = (255, 100, 255)  # Light Magenta
+                            smile_type = "Laugh"
+                    else:
+                        # Mouth NOT opened significantly - this is a smile (genuine or fake)
+                        # Genuine smile: eyes become smaller, NO significant mouth opening
+                        # Fake smile: eyes NOT smaller, NO significant mouth opening
+                        EYE_SQUINT_THRESHOLD_SMILE = 6.0  # Eyes must be at least 6% smaller for genuine smile
+                        EYE_NO_SQUINT_THRESHOLD_SMILE = 2.0  # Eyes NOT smaller (less than 2% decrease) = fake smile
+                        
+                        if baseline_eye_aperture and baseline_eye_aperture > 0:
+                            if eye_aperture_decrease >= EYE_SQUINT_THRESHOLD_SMILE:
+                                # Genuine Smile: eyes become smaller, no significant mouth opening
+                                smile_text = 'Genuine Smile!'
+                                smile_color = (0, 255, 0)  # Green
+                                smile_type = "Genuine"
+                            elif eye_aperture_decrease < EYE_NO_SQUINT_THRESHOLD_SMILE:
+                                # Fake Smile: eyes NOT smaller, no significant mouth opening
+                                smile_text = 'Fake Smile'
+                                smile_color = (0, 165, 255)  # Orange
+                                smile_type = "Fake"
+                            else:
+                                # Eyes are somewhat smaller but not enough - could be genuine, show as analyzing
+                                smile_text = 'Smile (Analyzing...)'
+                                smile_color = (0, 255, 255)  # Yellow
+                                smile_type = "Unknown"
+                        else:
+                            # Baseline not established yet
+                            smile_text = 'Smile (Analyzing...)'
+                            smile_color = (0, 255, 255)  # Yellow
+                            smile_type = "Unknown"
+                else:
+                    # Mouth width below threshold - no smile
+                    smile_text = 'No Smile'
+                    smile_color = (0, 0, 255)  # Red
+                    smile_type = ""
+                
+                # Display smile status
+                cv2.putText(frame, smile_text, (x_min, y_min - 40), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.9, smile_color, 2)
+                
+                # Draw eye landmarks for visualization
+                if eye_coords:
+                    # Draw left eye (top and bottom)
+                    cv2.circle(frame, eye_coords['left_eye_top'], 4, (255, 255, 0), -1)
+                    cv2.circle(frame, eye_coords['left_eye_bottom'], 4, (255, 255, 0), -1)
+                    cv2.line(frame, eye_coords['left_eye_top'], eye_coords['left_eye_bottom'], (255, 255, 0), 2)
+                    
+                    # Draw right eye (top and bottom)
+                    cv2.circle(frame, eye_coords['right_eye_top'], 4, (255, 255, 0), -1)
+                    cv2.circle(frame, eye_coords['right_eye_bottom'], 4, (255, 255, 0), -1)
+                    cv2.line(frame, eye_coords['right_eye_top'], eye_coords['right_eye_bottom'], (255, 255, 0), 2)
+                
+                # Display mouth width information - using normalized values for comparison
+                if baseline_width and baseline_width > 0:
+                    width_increase = ((current_normalized_mouth_width - baseline_width) / baseline_width) * 100
+                    width_text = f'Width: {current_mouth_width:.1f}px (Norm: {current_normalized_mouth_width:.4f}, +{width_increase:.1f}%)'
+                    cv2.putText(frame, width_text, (x_min, y_max + 60), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                
+                # Display mouth height information (for laugh detection) - using normalized values
+                if baseline_mouth_height and baseline_mouth_height > 0:
+                    mouth_opening_ratio = (current_normalized_mouth_height / baseline_mouth_height) * 100 if baseline_mouth_height > 0 else 0
+                    mouth_text = f'Mouth Height: {current_mouth_height:.1f}px (Norm: {current_normalized_mouth_height:.4f}, {mouth_opening_ratio:.1f}%)'
+                    mouth_color = (255, 0, 255) if mouth_opening_ratio >= 150 else (255, 255, 255)
+                    cv2.putText(frame, mouth_text, (x_min, y_max + 80), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, mouth_color, 1)
+                
+                # Display eye aperture information - using normalized values
+                if baseline_eye_aperture and baseline_eye_aperture > 0:
+                    eye_decrease = ((baseline_eye_aperture - current_normalized_eye_aperture) / baseline_eye_aperture) * 100
+                    eye_text = f'Eye Aperture: {current_eye_aperture:.1f}px (Norm: {current_normalized_eye_aperture:.4f}, {eye_decrease:+.1f}%)'
+                    eye_color = (0, 255, 0) if eye_decrease >= 8.0 else (0, 165, 255) if current_smile_score >= 0.65 else (255, 255, 255)
+                    cv2.putText(frame, eye_text, (x_min, y_max + 100), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, eye_color, 1)
+            elif results.multi_face_landmarks:
+                # Face detected but not ready (outside region or at angle) - show message
+                # Detection is DISABLED until face is properly centered and front-facing
+                for face_landmarks in results.multi_face_landmarks:
                     # Get face bounding box for display
                     x_coords = [lm.x * w for lm in face_landmarks.landmark]
                     y_coords = [lm.y * h for lm in face_landmarks.landmark]
                     x_min, x_max = int(min(x_coords)), int(max(x_coords))
                     y_min, y_max = int(min(y_coords)), int(max(y_coords))
                     
-                    # Draw face bounding box
-                    cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), (255, 0, 0), 2)
-                    cv2.putText(frame, 'Face', (x_min, y_min - 10), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
-                    
-                    # Draw ALL lip coordinates if detected
-                    if lip_coords:
-                        left_corner = lip_coords['left_corner']
-                        right_corner = lip_coords['right_corner']
-                        top_center = lip_coords['top_center']
-                        bottom_center = lip_coords['bottom_center']
-                        
-                        # Draw lip corners (green circles)
-                        cv2.circle(frame, left_corner, 5, (0, 255, 0), -1)
-                        cv2.circle(frame, right_corner, 5, (0, 255, 0), -1)
-                        
-                        # Draw line connecting corners
-                        cv2.line(frame, left_corner, right_corner, (0, 255, 0), 2)
-                        
-                        # Draw top and bottom lip centers (blue circles)
-                        cv2.circle(frame, top_center, 4, (255, 0, 0), -1)
-                        cv2.circle(frame, bottom_center, 4, (255, 0, 0), -1)
-                        
-                        # Draw additional key lip points (yellow)
-                        cv2.circle(frame, lip_coords['top_lip_left'], 3, (0, 255, 255), -1)
-                        cv2.circle(frame, lip_coords['top_lip_right'], 3, (0, 255, 255), -1)
-                        cv2.circle(frame, lip_coords['bottom_lip_left'], 3, (0, 255, 255), -1)
-                        cv2.circle(frame, lip_coords['bottom_lip_right'], 3, (0, 255, 255), -1)
-                        
-                        # Draw ALL mouth landmarks (small cyan dots)
-                        if 'all_landmarks' in lip_coords:
-                            for landmark_name, coord in lip_coords['all_landmarks'].items():
-                                cv2.circle(frame, coord, 2, (255, 255, 0), -1)
-                        
-                        # Display key coordinates
-                        coord_text = f'L:{left_corner[0]},{left_corner[1]} R:{right_corner[0]},{right_corner[1]}'
-                        cv2.putText(frame, coord_text, (x_min, y_max + 20), 
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-                        
-                        # Display all coordinates as text (scrollable if needed)
-                        all_coords_text = "All Lip Coords: "
-                        coord_list = []
-                        if 'all_landmarks' in lip_coords:
-                            for landmark_name, coord in lip_coords['all_landmarks'].items():
-                                coord_list.append(f"{landmark_name}:({coord[0]},{coord[1]})")
-                        
-                        # Display coordinates in multiple lines if needed
-                        coord_display = ", ".join(coord_list[:5])  # Show first 5
-                        if len(coord_list) > 5:
-                            coord_display += f" ... (+{len(coord_list)-5} more)"
-                        cv2.putText(frame, coord_display, (x_min, y_max + 40), 
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
-                    
-                    # Classification: No Smile, Smile (Genuine/Fake), or Laugh
-                    # Lower threshold for better detection sensitivity
-                    SMILE_DETECTION_THRESHOLD = 0.5  # Lower threshold for better detection
-                    
-                    if current_smile_score >= SMILE_DETECTION_THRESHOLD:
-                        # Mouth width exceeds threshold - check for laugh or smile
-                        is_laugh = False
-                        
-                        # Check laugh conditions using NORMALIZED values:
-                        # 1. Mouth width exceeds threshold (already satisfied)
-                        # 2. Mouth is opened (mouth height > baseline * threshold)
-                        # 3. Eyes aperture is small (eyes squinting/closed)
-                        if (baseline_mouth_height and baseline_mouth_height > 0 and 
-                            baseline_eye_aperture and baseline_eye_aperture > 0):
-                            
-                            # Check if mouth is opened (at least 30% more than baseline) - using normalized values
-                            mouth_opening_ratio = current_normalized_mouth_height / baseline_mouth_height if baseline_mouth_height > 0 else 0
-                            
-                            # Check if eyes are small (at least 10% smaller than baseline) - using normalized values
-                            eye_aperture_decrease = ((baseline_eye_aperture - current_normalized_eye_aperture) / baseline_eye_aperture) * 100
-                            
-                            # Laugh: mouth opened AND eyes small (lowered thresholds for better detection)
-                            if mouth_opening_ratio >= 1.3 and eye_aperture_decrease >= 10.0:
-                                smile_text = 'Laugh'
-                                smile_color = (255, 0, 255)  # Magenta
-                                smile_type = "Laugh"
-                                is_laugh = True
-                        
-                        # If not a laugh, check if it's genuine or fake smile
-                        # Genuine smile: NO mouth opening required, just eyes smaller
-                        if not is_laugh:
-                            if baseline_eye_aperture and baseline_eye_aperture > 0:
-                                # Calculate eye aperture change (percentage decrease) - using normalized values
-                                eye_aperture_decrease = ((baseline_eye_aperture - current_normalized_eye_aperture) / baseline_eye_aperture) * 100
-                                
-                                # Genuine smile: eyes become smaller (aperture decreases by at least 5%)
-                                # NO mouth opening required for genuine smile
-                                if eye_aperture_decrease >= 5.0:  # 5% decrease threshold
-                                    smile_text = 'Genuine Smile!'
-                                    smile_color = (0, 255, 0)  # Green
-                                    smile_type = "Genuine"
-                                else:
-                                    # Only show fake smile if eyes are clearly NOT smaller (within 2% of baseline)
-                                    # This prevents false positives when eyes are slightly smaller but not enough
-                                    if eye_aperture_decrease < 2.0:  # Eyes not smaller (less than 2% decrease)
-                                        smile_text = 'Fake Smile'
-                                        smile_color = (0, 165, 255)  # Orange
-                                        smile_type = "Fake"
-                                    else:
-                                        # Eyes are somewhat smaller but not enough - could be genuine, show as analyzing
-                                        smile_text = 'Smile (Analyzing...)'
-                                        smile_color = (0, 255, 255)  # Yellow
-                                        smile_type = "Unknown"
-                            else:
-                                # Baseline not established yet
-                                smile_text = 'Smile (Analyzing...)'
-                                smile_color = (0, 255, 255)  # Yellow
-                                smile_type = "Unknown"
-                    else:
-                        smile_text = 'No Smile'
-                        smile_color = (0, 0, 255)  # Red
-                        smile_type = ""
-                    
-                    # Display smile status
-                    cv2.putText(frame, smile_text, (x_min, y_min - 40), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.9, smile_color, 2)
-                    
-                    # Draw eye landmarks for visualization
-                    if eye_coords:
-                        # Draw left eye (top and bottom)
-                        cv2.circle(frame, eye_coords['left_eye_top'], 4, (255, 255, 0), -1)
-                        cv2.circle(frame, eye_coords['left_eye_bottom'], 4, (255, 255, 0), -1)
-                        cv2.line(frame, eye_coords['left_eye_top'], eye_coords['left_eye_bottom'], (255, 255, 0), 2)
-                        
-                        # Draw right eye (top and bottom)
-                        cv2.circle(frame, eye_coords['right_eye_top'], 4, (255, 255, 0), -1)
-                        cv2.circle(frame, eye_coords['right_eye_bottom'], 4, (255, 255, 0), -1)
-                        cv2.line(frame, eye_coords['right_eye_top'], eye_coords['right_eye_bottom'], (255, 255, 0), 2)
-                    
-                    # Display mouth width information - using normalized values for comparison
-                    if baseline_width and baseline_width > 0:
-                        width_increase = ((current_normalized_mouth_width - baseline_width) / baseline_width) * 100
-                        width_text = f'Width: {current_mouth_width:.1f}px (Norm: {current_normalized_mouth_width:.4f}, +{width_increase:.1f}%)'
-                        cv2.putText(frame, width_text, (x_min, y_max + 60), 
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-                    
-                    # Display mouth height information (for laugh detection) - using normalized values
-                    if baseline_mouth_height and baseline_mouth_height > 0:
-                        mouth_opening_ratio = (current_normalized_mouth_height / baseline_mouth_height) * 100 if baseline_mouth_height > 0 else 0
-                        mouth_text = f'Mouth Height: {current_mouth_height:.1f}px (Norm: {current_normalized_mouth_height:.4f}, {mouth_opening_ratio:.1f}%)'
-                        mouth_color = (255, 0, 255) if mouth_opening_ratio >= 150 else (255, 255, 255)
-                        cv2.putText(frame, mouth_text, (x_min, y_max + 80), 
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, mouth_color, 1)
-                    
-                    # Display eye aperture information - using normalized values
-                    if baseline_eye_aperture and baseline_eye_aperture > 0:
-                        eye_decrease = ((baseline_eye_aperture - current_normalized_eye_aperture) / baseline_eye_aperture) * 100
-                        eye_text = f'Eye Aperture: {current_eye_aperture:.1f}px (Norm: {current_normalized_eye_aperture:.4f}, {eye_decrease:+.1f}%)'
-                        eye_color = (0, 255, 0) if eye_decrease >= 8.0 else (0, 165, 255) if current_smile_score >= 0.65 else (255, 255, 255)
-                        cv2.putText(frame, eye_text, (x_min, y_max + 100), 
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, eye_color, 1)
+                    # Show unified message for all cases where face is not properly positioned
+                    cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), (0, 165, 255), 2)
+                    cv2.putText(frame, "Please Center The Face", (x_min, y_min - 10), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
+                    break  # Only show first face
             
             # Add current score to smoothing buffer
             smile_scores.append(current_smile_score)
@@ -543,8 +852,42 @@ def detect_smile():
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             cv2.putText(frame, f'Current: {current_smile_score:.3f}', (10, 60),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
+            
+            # Display prominent message when face is not properly positioned (detection disabled)
+            if not (face_in_region_landmarks is not None and face_is_front_facing):
+                # Show "Please Center The Face" prominently in the center of the detection region
+                center_x = region_x + region_width // 2
+                center_y = region_y + region_height // 2
+                text_size = cv2.getTextSize("Please Center The Face", cv2.FONT_HERSHEY_SIMPLEX, 1.2, 3)[0]
+                text_x = center_x - text_size[0] // 2
+                text_y = center_y + text_size[1] // 2
+                
+                # Draw background rectangle for better visibility
+                padding = 20
+                cv2.rectangle(frame, 
+                             (text_x - padding, text_y - text_size[1] - padding),
+                             (text_x + text_size[0] + padding, text_y + padding),
+                             (0, 0, 0), -1)
+                cv2.rectangle(frame, 
+                             (text_x - padding, text_y - text_size[1] - padding),
+                             (text_x + text_size[0] + padding, text_y + padding),
+                             (0, 165, 255), 3)
+                
+                # Display the message
+                cv2.putText(frame, "Please Center The Face", (text_x, text_y),
+                           cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 165, 255), 3)
             if smile_type:
-                type_color = (255, 0, 255) if smile_type == "Laugh" else (0, 255, 0) if smile_type == "Genuine" else (0, 165, 255) if smile_type == "Fake" else (0, 255, 255)
+                # Color mapping for different smile types
+                if smile_type == "Laugh":
+                    type_color = (255, 0, 255)  # Magenta
+                elif smile_type == "Fake Laugh":
+                    type_color = (0, 100, 255)  # Dark Orange/Red
+                elif smile_type == "Genuine":
+                    type_color = (0, 255, 0)  # Green
+                elif smile_type == "Fake":
+                    type_color = (0, 165, 255)  # Orange
+                else:
+                    type_color = (0, 255, 255)  # Yellow (Unknown/Analyzing)
                 cv2.putText(frame, f'Type: {smile_type}', (10, 90),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, type_color, 2)
             
