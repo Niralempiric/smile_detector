@@ -1,12 +1,24 @@
 import streamlit as st
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration, WebRtcMode
-import cv2
 import numpy as np
+import sys
 import mediapipe as mp
+
+# MEDIA PIPE FIX FOR PYTHON 3.13+
+# MediaPipe currently has issues on Python 3.13. We need to check and warn.
+IS_PY313 = sys.version_info >= (3, 13)
+
 try:
     import mediapipe.solutions.face_mesh as mp_face_mesh
-except (ImportError, AttributeError):
-    from mediapipe.python.solutions import face_mesh as mp_face_mesh
+    import mediapipe.solutions.drawing_utils as mp_drawing
+except (ImportError, AttributeError, ModuleNotFoundError):
+    try:
+        from mediapipe.python.solutions import face_mesh as mp_face_mesh
+        from mediapipe.python.solutions import drawing_utils as mp_drawing
+    except:
+        mp_face_mesh = None
+        mp_drawing = None
+
 from collections import deque
 import av
 
@@ -16,9 +28,13 @@ import av
 
 class SmileVideoProcessor(VideoProcessorBase):
     def __init__(self):
+        if mp_face_mesh is None:
+            st.error("CRITICAL: MediaPipe could not be loaded. This is usually due to Python 3.13 incompatibility.")
+            st.info("💡 FIX: Go to Streamlit Cloud Settings -> Python version -> Select 3.12")
+            return
+
         # Initialize MediaPipe Face Mesh
-        self.mp_face_mesh = mp.solutions.face_mesh
-        self.face_mesh = self.mp_face_mesh.FaceMesh(
+        self.face_mesh = mp_face_mesh.FaceMesh(
             max_num_faces=1,
             refine_landmarks=True,
             min_detection_confidence=0.5,
