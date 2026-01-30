@@ -278,16 +278,21 @@ rtc_configuration = RTCConfiguration(
     {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
 )
 
-webrtc_ctx = webrtc_streamer(
-    key="smile-detection",
-    mode=WebRtcMode.SENDRECV,
-    rtc_configuration=rtc_configuration,
-    video_processor_factory=SmileVideoProcessor,
-    async_processing=True,
-)
-
-if webrtc_ctx.video_processor:
-    st.sidebar.title("Settings")
-    webrtc_ctx.video_processor.region_size_ratio = st.sidebar.slider(
-        "Detection Region Size", 0.4, 0.9, 0.65
+# Only show the streamer if MediaPipe is available
+if mp_face_mesh is not None:
+    webrtc_ctx = webrtc_streamer(
+        key="smile-detection",
+        mode=WebRtcMode.SENDRECV,
+        rtc_configuration=rtc_configuration,
+        video_processor_factory=SmileVideoProcessor,
+        async_processing=True,
     )
+
+    if webrtc_ctx.video_processor:
+        st.sidebar.title("Settings")
+        webrtc_ctx.video_processor.region_size_ratio = st.sidebar.slider(
+            "Detection Region Size", 0.4, 0.9, 0.65
+        )
+else:
+    st.warning("⚠️ Application is in standby until Python version is corrected.")
+    st.info("Don't forget to check the [walkthrough.md](file:///Users/empiricdev/.gemini/antigravity/brain/bd426bde-b0a7-49ff-a135-bc9359183aa0/walkthrough.md) for detailed fix instructions.")
