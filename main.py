@@ -9,6 +9,38 @@ import mediapipe as mp
 from collections import deque
 
 
+def calculate_face_size(face_landmarks, image_width, image_height):
+    """
+    Calculate face size for normalization (distance-based scaling)
+    Uses the distance between outer eye corners as a reference
+    
+    Args:
+        face_landmarks: MediaPipe face landmarks
+        image_width: Width of the image
+        image_height: Height of the image
+    
+    Returns:
+        face_size: Normalized face size (distance between outer eye corners)
+    """
+    # MediaPipe face mesh landmark indices for outer eye corners
+    # Left eye outer corner: 33
+    # Right eye outer corner: 263
+    LEFT_EYE_OUTER = 33
+    RIGHT_EYE_OUTER = 263
+    
+    left_eye_outer = face_landmarks.landmark[LEFT_EYE_OUTER]
+    right_eye_outer = face_landmarks.landmark[RIGHT_EYE_OUTER]
+    
+    # Convert to pixel coordinates
+    left_eye_outer_px = np.array([left_eye_outer.x * image_width, left_eye_outer.y * image_height])
+    right_eye_outer_px = np.array([right_eye_outer.x * image_width, right_eye_outer.y * image_height])
+    
+    # Calculate distance between outer eye corners (face width reference)
+    face_size = np.linalg.norm(right_eye_outer_px - left_eye_outer_px)
+    
+    return face_size
+
+
 def calculate_eye_aperture(face_landmarks, image_width, image_height):
     """
     Calculate eye aperture (vertical opening) for both eyes
@@ -20,7 +52,7 @@ def calculate_eye_aperture(face_landmarks, image_width, image_height):
         image_height: Height of the image
     
     Returns:
-        tuple: (average_eye_aperture, left_eye_aperture, right_eye_aperture, eye_coords)
+        tuple: (average_eye_aperture, left_eye_aperture, right_eye_aperture, eye_coords, normalized_aperture)
     """
     # MediaPipe face mesh eye landmark indices
     # Left eye: top (159), bottom (145)
@@ -49,6 +81,12 @@ def calculate_eye_aperture(face_landmarks, image_width, image_height):
     # Average aperture of both eyes
     average_aperture = (left_eye_aperture + right_eye_aperture) / 2.0
     
+    # Calculate face size for normalization
+    face_size = calculate_face_size(face_landmarks, image_width, image_height)
+    
+    # Normalize aperture by face size (makes it distance-independent)
+    normalized_aperture = average_aperture / face_size if face_size > 0 else average_aperture
+    
     # Store eye coordinates for visualization
     eye_coords = {
         'left_eye_top': (int(left_eye_top_px[0]), int(left_eye_top_px[1])),
@@ -57,7 +95,7 @@ def calculate_eye_aperture(face_landmarks, image_width, image_height):
         'right_eye_bottom': (int(right_eye_bottom_px[0]), int(right_eye_bottom_px[1]))
     }
     
-    return average_aperture, left_eye_aperture, right_eye_aperture, eye_coords
+    return average_aperture, left_eye_aperture, right_eye_aperture, eye_coords, normalized_aperture
 
 
 def calculate_smile_score_from_landmarks(face_landmarks, image_width, image_height, baseline_width=None):
@@ -71,7 +109,7 @@ def calculate_smile_score_from_landmarks(face_landmarks, image_width, image_heig
         baseline_width: Baseline mouth width when not smiling (None for first frame)
     
     Returns:
-        tuple: (smile_score (0-1), lip_coordinates_dict, current_mouth_width)
+        tuple: (smile_score (0-1), lip_coordinates_dict, current_mouth_width, mouth_height, normalized_mouth_width, normalized_mouth_height)
     """
     # MediaPipe face mesh landmark indices for mouth
     # Full mouth outline landmarks
@@ -118,28 +156,36 @@ def calculate_smile_score_from_landmarks(face_landmarks, image_width, image_heig
     # Calculate mouth height (vertical distance between top and bottom lip centers)
     mouth_height = abs(bottom_lip_px[1] - top_lip_px[1])
     
+    # Calculate face size for normalization
+    face_size = calculate_face_size(face_landmarks, image_width, image_height)
+    
+    # Normalize measurements by face size (makes them distance-independent)
+    normalized_mouth_width = mouth_width / face_size if face_size > 0 else mouth_width
+    normalized_mouth_height = mouth_height / face_size if face_size > 0 else mouth_height
+    
     # Calculate additional lip points for coordinate display
     top_lip_left_px = np.array([top_lip_left.x * image_width, top_lip_left.y * image_height])
     top_lip_right_px = np.array([top_lip_right.x * image_width, top_lip_right.y * image_height])
     bottom_lip_left_px = np.array([bottom_lip_left.x * image_width, bottom_lip_left.y * image_height])
     bottom_lip_right_px = np.array([bottom_lip_right.x * image_width, bottom_lip_right.y * image_height])
     
-    # SMILE DETECTION BASED ON MOUTH WIDTH INCREASE (HORIZONTAL LINE LENGTH)
-    # When smiling, the horizontal line (mouth width) increases from baseline
-    # Calculate smile score based on width increase from baseline
+    # SMILE DETECTION BASED ON NORMALIZED MOUTH WIDTH INCREASE
+    # Use normalized width for distance-independent detection
+    # When smiling, the normalized mouth width increases from baseline
     
     if baseline_width is None or baseline_width == 0:
         # No baseline yet - assume neutral (not smiling)
         smile_score = 0.0
         width_increase_ratio = 0.0
     else:
-        # Calculate width increase ratio (percentage increase)
-        width_increase = mouth_width - baseline_width
+        # Use normalized width for comparison (distance-independent)
+        # Calculate width increase ratio (percentage increase) using normalized values
+        width_increase = normalized_mouth_width - baseline_width
         width_increase_ratio = width_increase / baseline_width if baseline_width > 0 else 0.0
         
-        # Threshold: 15% increase = smile threshold
-        # Scale: 0% = 0.0, 15% = 0.5, 30%+ = 1.0
-        SMILE_THRESHOLD = 0.15  # 15% increase threshold
+        # Threshold: 12% increase = smile threshold (lowered for better detection)
+        # Scale: 0% = 0.0, 12% = 0.5, 24%+ = 1.0
+        SMILE_THRESHOLD = 0.12  # 12% increase threshold (more sensitive)
         
         if width_increase_ratio < 0:
             # Width decreased (mouth closed more) - definitely not smiling
@@ -150,9 +196,9 @@ def calculate_smile_score_from_landmarks(face_landmarks, image_width, image_heig
             smile_score = (width_increase_ratio / SMILE_THRESHOLD) * 0.5
         else:
             # Above threshold - smiling
-            # Scale from threshold to 2x threshold (15% to 30% increase = full smile)
+            # Scale from threshold to 2x threshold (20% to 40% increase = full smile)
             excess = width_increase_ratio - SMILE_THRESHOLD
-            max_excess = SMILE_THRESHOLD  # Another 15% for full score
+            max_excess = SMILE_THRESHOLD  # Another 20% for full score
             smile_score = 0.5 + min(excess / max_excess, 1.0) * 0.5  # 0.5 to 1.0
     
     # Ensure score is between 0 and 1
@@ -189,7 +235,7 @@ def calculate_smile_score_from_landmarks(face_landmarks, image_width, image_heig
         'all_landmarks': all_mouth_coords  # All mouth landmarks
     }
     
-    return smile_score, lip_coords, mouth_width
+    return smile_score, lip_coords, mouth_width, mouth_height, normalized_mouth_width, normalized_mouth_height
 
 
 def detect_smile():
@@ -229,12 +275,16 @@ def detect_smile():
     
     # Use a deque for smoothing (moving average)
     smile_scores = deque(maxlen=10)  # Average over last 10 frames
-    baseline_width = None  # Baseline mouth width (neutral expression)
+    baseline_width = None  # Baseline normalized mouth width (neutral expression)
     baseline_widths = deque(maxlen=30)  # Track baseline over time
     
     # Eye aperture tracking for genuine/fake smile detection
-    baseline_eye_aperture = None  # Baseline eye aperture (neutral expression)
+    baseline_eye_aperture = None  # Baseline normalized eye aperture (neutral expression)
     baseline_eye_apertures = deque(maxlen=30)  # Track baseline eye aperture over time
+    
+    # Mouth opening tracking for laugh detection
+    baseline_mouth_height = None  # Baseline normalized mouth height (neutral expression, closed mouth)
+    baseline_mouth_heights = deque(maxlen=30)  # Track baseline mouth height over time
     
     with mp_face_mesh.FaceMesh(
         max_num_faces=1,
@@ -262,41 +312,55 @@ def detect_smile():
             smile_color = (128, 128, 128)
             lip_coords = None
             current_mouth_width = 0.0
+            current_mouth_height = 0.0
+            current_normalized_mouth_width = 0.0
+            current_normalized_mouth_height = 0.0
             current_eye_aperture = 0.0
+            current_normalized_eye_aperture = 0.0
             eye_coords = None
-            smile_type = ""  # "Genuine" or "Fake"
+            smile_type = ""  # "Genuine", "Fake", or "Laugh"
             
             if results.multi_face_landmarks:
                 for face_landmarks in results.multi_face_landmarks:
-                    # Calculate smile score from landmarks
-                    current_smile_score, lip_coords, current_mouth_width = calculate_smile_score_from_landmarks(
+                    # Calculate smile score from landmarks (returns normalized values)
+                    current_smile_score, lip_coords, current_mouth_width, current_mouth_height, current_normalized_mouth_width, current_normalized_mouth_height = calculate_smile_score_from_landmarks(
                         face_landmarks, w, h, baseline_width
                     )
                     
-                    # Calculate eye aperture
-                    avg_aperture, left_aperture, right_aperture, eye_coords = calculate_eye_aperture(
+                    # Calculate eye aperture (returns normalized value)
+                    avg_aperture, left_aperture, right_aperture, eye_coords, current_normalized_eye_aperture = calculate_eye_aperture(
                         face_landmarks, w, h
                     )
                     current_eye_aperture = avg_aperture
                     
-                    # Update baseline width when not smiling (score < 0.3)
-                    # Use rolling average to establish baseline
-                    if current_smile_score < 0.3:
-                        baseline_widths.append(current_mouth_width)
-                        if len(baseline_widths) > 5:  # After 5 frames, establish baseline
+                    # Update baseline using NORMALIZED values (distance-independent)
+                    # Use rolling average to establish baseline - only update when clearly not smiling
+                    if current_smile_score < 0.4:  # More conservative threshold for baseline updates
+                        # Use normalized values for baseline tracking
+                        baseline_widths.append(current_normalized_mouth_width)
+                        if len(baseline_widths) > 10:  # Need more frames (10) for stable baseline
                             baseline_width = sum(baseline_widths) / len(baseline_widths)
                     elif baseline_width is None and len(baseline_widths) > 0:
-                        # If no baseline yet, use current width as initial baseline
-                        baseline_width = sum(baseline_widths) / len(baseline_widths) if baseline_widths else current_mouth_width
+                        # If no baseline yet, use current normalized width as initial baseline
+                        baseline_width = sum(baseline_widths) / len(baseline_widths) if baseline_widths else current_normalized_mouth_width
                     
-                    # Update baseline eye aperture when not smiling (score < 0.3)
-                    if current_smile_score < 0.3:
-                        baseline_eye_apertures.append(current_eye_aperture)
-                        if len(baseline_eye_apertures) > 5:  # After 5 frames, establish baseline
+                    # Update baseline eye aperture using normalized values
+                    if current_smile_score < 0.4:  # More conservative threshold for baseline updates
+                        baseline_eye_apertures.append(current_normalized_eye_aperture)
+                        if len(baseline_eye_apertures) > 10:  # Need more frames (10) for stable baseline
                             baseline_eye_aperture = sum(baseline_eye_apertures) / len(baseline_eye_apertures)
                     elif baseline_eye_aperture is None and len(baseline_eye_apertures) > 0:
-                        # If no baseline yet, use current aperture as initial baseline
-                        baseline_eye_aperture = sum(baseline_eye_apertures) / len(baseline_eye_apertures) if baseline_eye_apertures else current_eye_aperture
+                        # If no baseline yet, use current normalized aperture as initial baseline
+                        baseline_eye_aperture = sum(baseline_eye_apertures) / len(baseline_eye_apertures) if baseline_eye_apertures else current_normalized_eye_aperture
+                    
+                    # Update baseline mouth height using normalized values
+                    if current_smile_score < 0.4:  # More conservative threshold for baseline updates
+                        baseline_mouth_heights.append(current_normalized_mouth_height)
+                        if len(baseline_mouth_heights) > 10:  # Need more frames (10) for stable baseline
+                            baseline_mouth_height = sum(baseline_mouth_heights) / len(baseline_mouth_heights)
+                    elif baseline_mouth_height is None and len(baseline_mouth_heights) > 0:
+                        # If no baseline yet, use current normalized height as initial baseline
+                        baseline_mouth_height = sum(baseline_mouth_heights) / len(baseline_mouth_heights) if baseline_mouth_heights else current_normalized_mouth_height
                     
                     # Draw face landmarks (optional - can comment out)
                     # mp_drawing.draw_landmarks(
@@ -366,29 +430,64 @@ def detect_smile():
                         cv2.putText(frame, coord_display, (x_min, y_max + 40), 
                                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
                     
-                    # Binary classification: No Smile or Smile
-                    # Threshold based on width increase (0.5 = 15% increase threshold)
-                    if current_smile_score >= 0.5:
-                        # Smile detected - now check if it's genuine or fake
-                        if baseline_eye_aperture and baseline_eye_aperture > 0:
-                            # Calculate eye aperture change (percentage decrease)
-                            eye_aperture_decrease = ((baseline_eye_aperture - current_eye_aperture) / baseline_eye_aperture) * 100
+                    # Classification: No Smile, Smile (Genuine/Fake), or Laugh
+                    # Lower threshold for better detection sensitivity
+                    SMILE_DETECTION_THRESHOLD = 0.5  # Lower threshold for better detection
+                    
+                    if current_smile_score >= SMILE_DETECTION_THRESHOLD:
+                        # Mouth width exceeds threshold - check for laugh or smile
+                        is_laugh = False
+                        
+                        # Check laugh conditions using NORMALIZED values:
+                        # 1. Mouth width exceeds threshold (already satisfied)
+                        # 2. Mouth is opened (mouth height > baseline * threshold)
+                        # 3. Eyes aperture is small (eyes squinting/closed)
+                        if (baseline_mouth_height and baseline_mouth_height > 0 and 
+                            baseline_eye_aperture and baseline_eye_aperture > 0):
                             
-                            # Genuine smile: eyes become smaller (aperture decreases by at least 5%)
-                            # Fake smile: eyes don't become smaller (aperture stays same or increases)
-                            if eye_aperture_decrease >= 5.0:  # 5% decrease threshold
-                                smile_text = 'Genuine Smile!'
-                                smile_color = (0, 255, 0)  # Green
-                                smile_type = "Genuine"
+                            # Check if mouth is opened (at least 30% more than baseline) - using normalized values
+                            mouth_opening_ratio = current_normalized_mouth_height / baseline_mouth_height if baseline_mouth_height > 0 else 0
+                            
+                            # Check if eyes are small (at least 10% smaller than baseline) - using normalized values
+                            eye_aperture_decrease = ((baseline_eye_aperture - current_normalized_eye_aperture) / baseline_eye_aperture) * 100
+                            
+                            # Laugh: mouth opened AND eyes small (lowered thresholds for better detection)
+                            if mouth_opening_ratio >= 1.3 and eye_aperture_decrease >= 10.0:
+                                smile_text = 'Laugh! 😂'
+                                smile_color = (255, 0, 255)  # Magenta
+                                smile_type = "Laugh"
+                                is_laugh = True
+                        
+                        # If not a laugh, check if it's genuine or fake smile
+                        # Genuine smile: NO mouth opening required, just eyes smaller
+                        if not is_laugh:
+                            if baseline_eye_aperture and baseline_eye_aperture > 0:
+                                # Calculate eye aperture change (percentage decrease) - using normalized values
+                                eye_aperture_decrease = ((baseline_eye_aperture - current_normalized_eye_aperture) / baseline_eye_aperture) * 100
+                                
+                                # Genuine smile: eyes become smaller (aperture decreases by at least 5%)
+                                # NO mouth opening required for genuine smile
+                                if eye_aperture_decrease >= 5.0:  # 5% decrease threshold
+                                    smile_text = 'Genuine Smile!'
+                                    smile_color = (0, 255, 0)  # Green
+                                    smile_type = "Genuine"
+                                else:
+                                    # Only show fake smile if eyes are clearly NOT smaller (within 2% of baseline)
+                                    # This prevents false positives when eyes are slightly smaller but not enough
+                                    if eye_aperture_decrease < 2.0:  # Eyes not smaller (less than 2% decrease)
+                                        smile_text = 'Fake Smile'
+                                        smile_color = (0, 165, 255)  # Orange
+                                        smile_type = "Fake"
+                                    else:
+                                        # Eyes are somewhat smaller but not enough - could be genuine, show as analyzing
+                                        smile_text = 'Smile (Analyzing...)'
+                                        smile_color = (0, 255, 255)  # Yellow
+                                        smile_type = "Unknown"
                             else:
-                                smile_text = 'Fake Smile'
-                                smile_color = (0, 165, 255)  # Orange
-                                smile_type = "Fake"
-                        else:
-                            # Baseline not established yet
-                            smile_text = 'Smile (Analyzing...)'
-                            smile_color = (0, 255, 255)  # Yellow
-                            smile_type = "Unknown"
+                                # Baseline not established yet
+                                smile_text = 'Smile (Analyzing...)'
+                                smile_color = (0, 255, 255)  # Yellow
+                                smile_type = "Unknown"
                     else:
                         smile_text = 'No Smile'
                         smile_color = (0, 0, 255)  # Red
@@ -410,19 +509,27 @@ def detect_smile():
                         cv2.circle(frame, eye_coords['right_eye_bottom'], 4, (255, 255, 0), -1)
                         cv2.line(frame, eye_coords['right_eye_top'], eye_coords['right_eye_bottom'], (255, 255, 0), 2)
                     
-                    # Display mouth width information
+                    # Display mouth width information - using normalized values for comparison
                     if baseline_width and baseline_width > 0:
-                        width_increase = ((current_mouth_width - baseline_width) / baseline_width) * 100
-                        width_text = f'Width: {current_mouth_width:.1f}px (Baseline: {baseline_width:.1f}px, +{width_increase:.1f}%)'
+                        width_increase = ((current_normalized_mouth_width - baseline_width) / baseline_width) * 100
+                        width_text = f'Width: {current_mouth_width:.1f}px (Norm: {current_normalized_mouth_width:.4f}, +{width_increase:.1f}%)'
                         cv2.putText(frame, width_text, (x_min, y_max + 60), 
                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
                     
-                    # Display eye aperture information
+                    # Display mouth height information (for laugh detection) - using normalized values
+                    if baseline_mouth_height and baseline_mouth_height > 0:
+                        mouth_opening_ratio = (current_normalized_mouth_height / baseline_mouth_height) * 100 if baseline_mouth_height > 0 else 0
+                        mouth_text = f'Mouth Height: {current_mouth_height:.1f}px (Norm: {current_normalized_mouth_height:.4f}, {mouth_opening_ratio:.1f}%)'
+                        mouth_color = (255, 0, 255) if mouth_opening_ratio >= 150 else (255, 255, 255)
+                        cv2.putText(frame, mouth_text, (x_min, y_max + 80), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, mouth_color, 1)
+                    
+                    # Display eye aperture information - using normalized values
                     if baseline_eye_aperture and baseline_eye_aperture > 0:
-                        eye_decrease = ((baseline_eye_aperture - current_eye_aperture) / baseline_eye_aperture) * 100
-                        eye_text = f'Eye Aperture: {current_eye_aperture:.1f}px (Baseline: {baseline_eye_aperture:.1f}px, {eye_decrease:+.1f}%)'
-                        eye_color = (0, 255, 0) if eye_decrease >= 5.0 else (0, 165, 255) if current_smile_score >= 0.5 else (255, 255, 255)
-                        cv2.putText(frame, eye_text, (x_min, y_max + 80), 
+                        eye_decrease = ((baseline_eye_aperture - current_normalized_eye_aperture) / baseline_eye_aperture) * 100
+                        eye_text = f'Eye Aperture: {current_eye_aperture:.1f}px (Norm: {current_normalized_eye_aperture:.4f}, {eye_decrease:+.1f}%)'
+                        eye_color = (0, 255, 0) if eye_decrease >= 8.0 else (0, 165, 255) if current_smile_score >= 0.65 else (255, 255, 255)
+                        cv2.putText(frame, eye_text, (x_min, y_max + 100), 
                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, eye_color, 1)
             
             # Add current score to smoothing buffer
@@ -436,15 +543,9 @@ def detect_smile():
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             cv2.putText(frame, f'Current: {current_smile_score:.3f}', (10, 60),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
-            if baseline_width:
-                cv2.putText(frame, f'Baseline Width: {baseline_width:.1f}px', (10, 90),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
-            if baseline_eye_aperture:
-                cv2.putText(frame, f'Baseline Eye Aperture: {baseline_eye_aperture:.1f}px', (10, 120),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
             if smile_type:
-                type_color = (0, 255, 0) if smile_type == "Genuine" else (0, 165, 255) if smile_type == "Fake" else (0, 255, 255)
-                cv2.putText(frame, f'Type: {smile_type}', (10, 150),
+                type_color = (255, 0, 255) if smile_type == "Laugh" else (0, 255, 0) if smile_type == "Genuine" else (0, 165, 255) if smile_type == "Fake" else (0, 255, 255)
+                cv2.putText(frame, f'Type: {smile_type}', (10, 90),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, type_color, 2)
             
             cv2.imshow('Smile Detection', frame)
@@ -493,7 +594,7 @@ def detect_smile_from_image(image_path):
         
         for face_landmarks in results.multi_face_landmarks:
             # Calculate smile score from landmarks (no baseline for static images)
-            smile_score, lip_coords, mouth_width = calculate_smile_score_from_landmarks(
+            smile_score, lip_coords, mouth_width, mouth_height, normalized_mouth_width, normalized_mouth_height = calculate_smile_score_from_landmarks(
                 face_landmarks, w, h, None
             )
             
