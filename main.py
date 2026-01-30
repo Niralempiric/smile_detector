@@ -453,7 +453,7 @@ def detect_smile():
                             
                             # Laugh: mouth opened AND eyes small (lowered thresholds for better detection)
                             if mouth_opening_ratio >= 1.3 and eye_aperture_decrease >= 10.0:
-                                smile_text = 'Laugh! 😂'
+                                smile_text = 'Laugh'
                                 smile_color = (255, 0, 255)  # Magenta
                                 smile_type = "Laugh"
                                 is_laugh = True
