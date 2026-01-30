@@ -3,6 +3,10 @@ from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfigurati
 import cv2
 import numpy as np
 import mediapipe as mp
+try:
+    import mediapipe.solutions.face_mesh as mp_face_mesh
+except (ImportError, AttributeError):
+    from mediapipe.python.solutions import face_mesh as mp_face_mesh
 from collections import deque
 import av
 
